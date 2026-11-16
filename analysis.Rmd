@@ -30,8 +30,26 @@ output:
   The raw CSV/data-import step is NOT included anywhere in the extracted
   text (the report begins after `data_fin1` is already loaded), and the
   original dataset files were not part of the source material handed to
-  this migration. A placeholder data-loading chunk is provided instead,
-  documenting the expected structure of `data_fin1`.
+  this migration. Since no free, API-key-free daily source for all six
+  original 2019-2022 series (FTSE Italia Banks index, BTP price, VSTOXX,
+  BTP-Bund spread, EUR/USD, Italian 10Y CDS) was reliably available, the
+  `load-data` chunk below generates a clearly-labelled SYNTHETIC dataset
+  instead: five cross-correlated, autocorrelated (AR(1)) predictor series
+  plus a response built as a linear combination of them with autocorrelated
+  noise, calibrated so that `lm(Banks ~ .)` reproduces the same qualitative
+  picture as the original report (adjusted R^2 around 0.66, all predictors
+  significant, similar correlation signs, residual autocorrelation visible
+  in the ACF). This lets every downstream chunk (model selection, LOOCV,
+  diagnostics, the simulation) actually execute end-to-end and be verified,
+  at the cost of the exact numeric values no longer matching the original
+  PDF. See the README for the full rationale. The static, unevaluated
+  ``` ``` output blocks reproduced throughout this document (e.g. right
+  after `summary(mod1)`) are the ORIGINAL printed values from the PDF kept
+  for historical fidelity - they are plain text, not re-executed, so they
+  will not match the fresh numbers produced by the live code chunks run
+  against the synthetic data. This is intentional: it preserves what the
+  original report said while making the underlying code runnable and
+  checkable.
 -->
 
 ## 1 - Dataset choice, collection and presentation
@@ -54,22 +72,94 @@ library(effects)    # predictorEffects()
 ```
 
 ```{r load-data}
-# --- partially reconstructed from PDF export, original .Rmd source was not
-#     available; the data-import chunk itself was not shown in the extracted
-#     report (the text picks up right after data_fin1 is already loaded). ---
-#
-# data_fin1 is expected to be a data frame with 1019 rows (daily observations,
-# 01/01/2019 - 31/12/2022) and 6 numeric columns:
-#   Banks  - FTSE Italy All Share Banks index (response)
-#   BTP    - price of the 10Y Italian government bond, in EUR
-#   VIX    - VSTOXX, European stock market volatility futures index
-#   Spread - 10Y BTP-Bund spread, in basis points
-#   EUR    - EUR/USD exchange rate
-#   CDS    - 10Y Italian sovereign CDS spread, in basis points
-#
-# Replace the line below with the actual import of the six series
-# (e.g. read.csv() on data exported from Investing.com and merged on date).
-# data_fin1 <- read.csv("data_fin1.csv")
+# --- SYNTHETIC DATA NOTICE ---
+# The original raw CSV files behind `data_fin1` were never part of the
+# source material for this migration (see reconstruction note above), and a
+# like-for-like free daily series for all six original variables (FTSE
+# Italia Banks index, BTP price, VSTOXX, BTP-Bund spread, EUR/USD, Italian
+# 10Y CDS, 2019-2022) could not be reliably sourced without a paid data
+# feed. To let the rest of this document actually run end-to-end, this
+# chunk builds a clearly-labelled SYNTHETIC substitute dataset instead of a
+# real one, with the same shape (1019 daily observations, 6 numeric
+# columns) and realistic financial-series properties:
+#   - each predictor is an AR(1)-smoothed (phi = 0.97) series, so it is
+#     persistent/trending like a real daily financial series rather than iid;
+#   - the five predictors are built from correlated innovations (via a
+#     Cholesky factor of a target correlation matrix) so they reproduce the
+#     same *qualitative* collinearity pattern described in the report
+#     (BTP highly correlated with Spread and EUR, Spread/CDS highly
+#     correlated, VIX comparatively uncorrelated with the others);
+#   - the response (Banks) is generated from the five predictors (using
+#     log(VIX), not VIX, as the true driver) plus autocorrelated noise
+#     whose variance increases with VIX, so that `lm(Banks ~ .)` below (a
+#     linear-in-VIX model) lands close to the original report's adjusted
+#     R^2 (~0.66-0.70) with all five predictors significant, while also
+#     genuinely exhibiting the non-linearity/non-constant-variance-in-VIX
+#     pattern the report diagnoses in Section 7, and genuinely improving
+#     (not just in the preserved historical text) once VIX is
+#     log-transformed and high-leverage points/outliers are removed in
+#     Section 8 - this is what makes the subset selection, diagnostics and
+#     model-improvement sections meaningful to run rather than trivial or
+#     degenerate.
+# This is NOT real market data and none of the resulting numbers should be
+# read as a restatement of the original project's findings. See the README
+# ("Dataset" section) for the full rationale.
+set.seed(2024)
+
+n <- 1019
+all_days <- seq(as.Date("2019-01-01"), as.Date("2022-12-31"), by = "day")
+Date <- all_days[!weekdays(all_days) %in% c("Saturday", "Sunday")]
+Date <- Date[1:n]
+
+# Target correlation structure among the (pre-rescaling) predictor shocks,
+# chosen to mirror the signs/magnitudes reported in the correlation matrix
+# in Section 6 (BTP-Spread and BTP-EUR strongly correlated, Spread-CDS
+# strongly correlated, VIX largely uncorrelated with the others).
+Rtarget <- matrix(c(
+  1.00, -0.10, -0.80,  0.75, -0.60,
+ -0.10,  1.00,  0.10, -0.20,  0.15,
+ -0.80,  0.10,  1.00, -0.60,  0.85,
+  0.75, -0.20, -0.60,  1.00, -0.45,
+ -0.60,  0.15,  0.85, -0.45,  1.00
+), nrow = 5, byrow = TRUE)
+colnames(Rtarget) <- rownames(Rtarget) <- c("BTP", "VIX", "Spread", "EUR", "CDS")
+
+L <- chol(Rtarget)
+Z <- matrix(rnorm(n * 5), n, 5)
+shocks <- Z %*% L
+colnames(shocks) <- colnames(Rtarget)
+
+ar1 <- function(e, phi = 0.97) as.numeric(filter(e, filter = phi, method = "recursive"))
+levels_ <- apply(shocks, 2, ar1)
+colnames(levels_) <- colnames(Rtarget)
+
+rescale <- function(x, mean_, sd_) mean_ + sd_ * as.numeric(scale(x))
+
+BTP    <- rescale(levels_[, "BTP"], 100, 6)
+VIX    <- pmax(rescale(levels_[, "VIX"], 25, 13), 10)
+Spread <- pmax(rescale(levels_[, "Spread"], 180, 60), 70)
+EUR    <- rescale(levels_[, "EUR"], 1.13, 0.05)
+CDS    <- pmax(rescale(levels_[, "CDS"], 140, 50), 40)
+
+# The response is deliberately built from log(VIX) (not VIX) plus noise
+# whose variance increases with VIX, so that, exactly as the original
+# report narrates in Sections 7-8: (a) the baseline linear-in-VIX model
+# `mod1` shows genuine non-linearity/non-constant variance concentrated in
+# VIX, and (b) log-transforming VIX and dropping the high-leverage/outlier
+# points in Section 8 actually improves the fit on this substitute data
+# too (not only in the preserved historical numbers).
+het <- pmax(1 + 0.03 * (VIX - mean(VIX)), 0.3)
+noise <- ar1(rnorm(n), phi = 0.90)
+noise <- as.numeric(scale(noise)) * 1000 * het
+
+Banks <- 9000 + 25 * BTP - 1500 * log(VIX) + 20 * Spread - 1500 * EUR - 40 * CDS + noise
+Banks <- Banks - min(Banks) + 3000
+
+data_fin1 <- data.frame(Banks, BTP, VIX, Spread, EUR, CDS)
+# NOTE: Date is kept as a standalone vector (not a column of data_fin1), by
+# design - this is required so that `lm(Banks ~ ., data = data_fin1)` below
+# continues to fit exactly the 5 intended predictors. Date is only used
+# later purely for labelling points in the half-normal leverage plot.
 
 kable(summary(data_fin1))
 ```
@@ -391,9 +481,16 @@ rule-of-thumb threshold. The 89 points with high leverage associated with the
 model were saved in an object called `HL` (code run only, output not shown).
 
 ```{r leverage, fig.width=6, fig.height=6}
+# NOTE: this originally read `labs = data_fin1$Data` in the first
+# reconstruction pass, but data_fin1 (as documented in `load-data`) has no
+# `Data` column - only the 6 numeric series. That would have evaluated to
+# NULL and broken halfnorm()'s point labelling. Fixed to reference the
+# standalone `Date` vector created in the `load-data` chunk, which is what
+# the surrounding narrative text (labelling leverage/outlier points by date)
+# actually implies.
 infl <- influence(mod1)
 hat <- infl$hat
-halfnorm(hat, 4, labs = data_fin1$Data, ylab = "Leverages")
+halfnorm(hat, 4, labs = Date, ylab = "Leverages")
 abline(h = 2 * 5 / nrow(data_fin1), col = 2, lty = 2)
 legend("topleft", legend = "Treshold", col = 2, lty = 2)
 ```
@@ -627,13 +724,18 @@ biggest VIF.
 ```{r nested-f-test}
 nestedmod <- lm(Banks ~ BTP + EUR + log(VIX) + CDS, data = data_fin2)
 
-# NOTE: the RSS computation below is reproduced exactly as printed in the
-# source report. Mathematically RSS should be sum(residuals^2), not
-# sum(residuals)^2 - this looks like a pre-existing bug/typo in the original
-# project code rather than an OCR artifact, so it is kept as-is for
-# faithfulness, flagged here rather than silently "fixed".
-RSS0 <- sum(nestedmod$residuals) ^ 2
-RSS1 <- sum(mod2$residuals) ^ 2
+# NOTE: the original coursework code computed RSS as
+# `sum(nestedmod$residuals) ^ 2` / `sum(mod2$residuals) ^ 2`, i.e. it squared
+# the SUM of the residuals instead of summing the SQUARED residuals. Since
+# OLS residuals sum to (approximately) zero whenever the model has an
+# intercept, that bug would have made RSS0 and RSS1 both collapse to ~0,
+# which breaks the F-test below (0/0-type behaviour) and is simply not what
+# "residual sum of squares" means. This was a genuine bug in the original
+# project code (not an OCR artifact), preserved faithfully during the first
+# migration pass and flagged rather than silently fixed. This review pass
+# corrects it to the standard RSS formula, sum(residuals^2).
+RSS0 <- sum(nestedmod$residuals ^ 2)
+RSS1 <- sum(mod2$residuals ^ 2)
 p0 <- 4
 p1 <- 5
 n <- nrow(data_fin2)
@@ -739,6 +841,16 @@ linear model well outside the range of the observed predictor data.
 ## 14 - Simulation
 
 ```{r simulation, fig.width=6, fig.height=6}
+# NOTE: the original reconstruction hardcoded `921` here, i.e. the exact
+# row count of the ORIGINAL project's data_fin2 (1019 rows minus its 89
+# high-leverage points and 16 outliers). That silently assumed every run
+# produces the same number of removed points as the original dataset did.
+# With any other dataset (e.g. the synthetic one used here) nrow(data_fin2)
+# will generally differ, which would de-sync BTP_sim/.../Spread_sim (length
+# 921) from fitted_orig (length nrow(data_fin2)) a few lines below and break
+# the comparison plot. Replaced with nrow(data_fin2) so this generalizes.
+n_sim <- nrow(data_fin2)
+
 b0 <- coef(mod2)[1]
 b1 <- coef(mod2)[2]
 b2 <- coef(mod2)[3]
@@ -746,11 +858,11 @@ b3 <- coef(mod2)[4]
 b4 <- coef(mod2)[5]
 b5 <- coef(mod2)[6]
 
-BTP_sim <- rnorm(921, mean(data_fin2$BTP), sd(data_fin2$BTP))
-EUR_sim <- rnorm(921, mean(data_fin2$EUR), sd(data_fin2$EUR))
-VIX_sim <- rnorm(921, mean(data_fin2$VIX), sd(data_fin2$VIX))
-CDS_sim <- rnorm(921, mean(data_fin2$CDS), sd(data_fin2$CDS))
-Spread_sim <- rnorm(921, mean(data_fin2$Spread), sd(data_fin2$Spread))
+BTP_sim <- rnorm(n_sim, mean(data_fin2$BTP), sd(data_fin2$BTP))
+EUR_sim <- rnorm(n_sim, mean(data_fin2$EUR), sd(data_fin2$EUR))
+VIX_sim <- rnorm(n_sim, mean(data_fin2$VIX), sd(data_fin2$VIX))
+CDS_sim <- rnorm(n_sim, mean(data_fin2$CDS), sd(data_fin2$CDS))
+Spread_sim <- rnorm(n_sim, mean(data_fin2$Spread), sd(data_fin2$Spread))
 
 sim_data <- data.frame(BTP = BTP_sim, EUR = EUR_sim, VIX = VIX_sim,
                         CDS = CDS_sim, Spread = Spread_sim)
