@@ -1,0 +1,765 @@
+---
+title: "Applied Linear Models - Final Project"
+author: "Patrick Poetto"
+date: "2023-07-10"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+<!--
+  RECONSTRUCTION NOTE
+  ====================
+  This .Rmd was reconstructed from a plain-text extraction of a knitted PDF
+  report (the original .Rmd source file was not available/preserved). The
+  extraction mixed prose, R output and garbled rasterized-plot text together,
+  and some R operators were OCR-mangled (e.g. "ˆ" instead of "^", smart quotes
+  instead of straight quotes, "\_" instead of "_", escaped brackets, etc.).
+
+  All of that has been cleaned up below. Code chunks that were explicitly
+  printed in the report are reconstructed with high confidence. A handful of
+  chunks were only implied by the surrounding text and the printed R console
+  output (the source code itself was not echoed in the PDF, usually because
+  the author set `echo=FALSE` or used an inline "code is run only" comment).
+  Those chunks are clearly marked below with:
+
+      # --- partially reconstructed from PDF export, original .Rmd source
+      #     was not available; inferred from narrative text and printed
+      #     output only ---
+
+  The raw CSV/data-import step is NOT included anywhere in the extracted
+  text (the report begins after `data_fin1` is already loaded), and the
+  original dataset files were not part of the source material handed to
+  this migration. A placeholder data-loading chunk is provided instead,
+  documenting the expected structure of `data_fin1`.
+-->
+
+## 1 - Dataset choice, collection and presentation
+
+The dataset used for this project concerns financial data time series. All
+the variables were individually collected from the Investing.com financial
+data bank and appended into a dataframe. Six numerical variables have been
+extracted from the daily time series data bank within a time range of four
+years, from 01/01/2019 to 31/12/2022, for a total of 1019 observations for
+each variable.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(knitr)      # kable()
+library(leaps)      # regsubsets()
+library(car)        # vif(), residualPlots()
+library(faraway)    # halfnorm()
+library(effects)    # predictorEffects()
+```
+
+```{r load-data}
+# --- partially reconstructed from PDF export, original .Rmd source was not
+#     available; the data-import chunk itself was not shown in the extracted
+#     report (the text picks up right after data_fin1 is already loaded). ---
+#
+# data_fin1 is expected to be a data frame with 1019 rows (daily observations,
+# 01/01/2019 - 31/12/2022) and 6 numeric columns:
+#   Banks  - FTSE Italy All Share Banks index (response)
+#   BTP    - price of the 10Y Italian government bond, in EUR
+#   VIX    - VSTOXX, European stock market volatility futures index
+#   Spread - 10Y BTP-Bund spread, in basis points
+#   EUR    - EUR/USD exchange rate
+#   CDS    - 10Y Italian sovereign CDS spread, in basis points
+#
+# Replace the line below with the actual import of the six series
+# (e.g. read.csv() on data exported from Investing.com and merged on date).
+# data_fin1 <- read.csv("data_fin1.csv")
+
+kable(summary(data_fin1))
+```
+
+The first variable named "Banks" will be used as the response for the
+following analysis, while the other ones will be taken as baseline
+predictors in order to build the best possible linear model.
+
+### Variables description
+
+* **Banks**: FTSE Italy All Share Banks index, the stock index containing all
+  the listed banks in the Italian stock market.
+* **BTP**: price of the 10Y Italian government bonds, expressed in EUR.
+* **VIX**: VSTOXX, the European stock market volatility futures index.
+* **Spread**: 10Y BTP-Bund spread, the difference between the two yields
+  expressed in basis points.
+* **EUR**: EUR/USD forex exchange rate, expressed in x Dollars for 1 Euro.
+* **CDS**: spread over the 10Y Italian bonds, the price paid (in basis
+  points) to get insurance against the default of such bonds.
+
+## 2 - Applied Goals
+
+Financial series behaviour is quite complex and characterized by
+fluctuations and volatility. In general, financial data shows a long-term
+growth trend while in the short term there is some random pattern, although
+most financial instruments are influenced by multiple factors, such as the
+macroeconomic situation, interest rates, monetary and fiscal policies,
+geopolitical conditions, currency fluctuations, and many other variables.
+Additionally, financial data can be influenced by market factors such as
+supply and demand, news, and economic and political events, which can cause
+sudden changes in asset prices. This is the reason why making financial
+predictions is so hard - and perhaps not the goal of this project. Financial
+data often present some peculiar statistical issues such as autocorrelation
+of the errors and long-term trends/stationarity, discussed further below.
+
+To summarize, the main goal of this project is to build an as-reliable-as-
+possible linear model, compliant with the statistical assumptions underlying
+OLS, that best explains the relationships among the variables - in order to
+understand what the real drivers of the response are and how the predictors
+affect it. Pursuing this aim could provide important indications to a
+potential stakeholder in order to let them make the right investment
+choices.
+
+## 3 - Data representation
+
+```{r histograms, fig.width=12, fig.height=3}
+par(mfrow = c(1, 6), mar = c(2, 2, 1, 1))
+for (var in c("Banks", "BTP", "VIX", "Spread", "EUR", "CDS")) {
+  hist(data_fin1[, var], main = var, xlab = "Values", ylab = "Frequency", col = "blue")
+}
+```
+
+```{r pairs-plot, fig.width=8, fig.height=8}
+pairs(data_fin1[, c("Banks", "BTP", "VIX", "Spread", "EUR", "CDS")],
+      col = "purple", cex = 0.5, pch = 1)
+```
+
+The most symmetric variable is the response. The others have some fat right
+or left tail. From the scatterplot matrix we can see some relationships: the
+response seems to have a negative correlation only with the VIX and EUR. The
+BTP has a negative correlation with the Spread and the CDS, and a positive
+relation with EUR. The VIX seems largely uncorrelated while the Spread is
+negatively correlated with EUR and positively with CDS. The EUR variable is
+negatively correlated with CDS.
+
+## 4 - Model fitting and subset selection
+
+Since the dataset does not include any categorical variable, we fit the
+model with no interactions.
+
+```{r mod1}
+mod1 <- lm(Banks ~ ., data = data_fin1)
+summary(mod1)
+```
+
+```
+#### Call:
+## lm(formula = Banks ~ ., data = data_fin1)
+#### Residuals:
+##      Min      1Q  Median      3Q     Max
+## -1901.99 -500.01  -55.28  459.75 2882.50
+#### Coefficients:
+##              Estimate Std. Error t value Pr(>|t|)
+## (Intercept) 11053.149    785.081  14.079  < 2e-16 ***
+## BTP            31.439      5.185   6.064 1.87e-09 ***
+## VIX           -49.378      2.686 -18.381  < 2e-16 ***
+## Spread         33.097      1.965  16.847  < 2e-16 ***
+## EUR         -2804.378    665.106  -4.216 2.70e-05 ***
+## CDS           -48.006      1.788 -26.853  < 2e-16 ***
+## ---
+## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+#### Residual standard error: 717.3 on 1013 degrees of freedom
+## Multiple R-squared:  0.6672, Adjusted R-squared:  0.6656
+## F-statistic: 406.2 on 5 and 1013 DF,  p-value: < 2.2e-16
+```
+
+The output of the `lm` function shows that all the variables are strongly
+significant, as well as the global F-test. The adjusted R-squared is good as
+well, 0.67, so the model is able to explain around 67% of the variability of
+the response. The estimate of EUR is quite odd because of its construction:
+for any unit (1 "penny", e.g. from 1.10 to 1.11) variation of the predictor
+the Banks index will lose about 28 points.
+
+### Leave-one-out cross-validation approach
+
+We now consider how to choose among a set of models of different sizes using
+cross-validation. This requires performing best subset selection within each
+of the k training sets. Since the model still has a manageable size we can
+perform a leave-one-out cross validation, so k is equal to n, the number of
+observations, so the approach looks at every possible subset combination.
+
+```{r loocv}
+i <- 1
+p <- 5
+k <- nrow(data_fin1)
+
+folds <- sample(1:k, nrow(data_fin1), replace = FALSE)
+cv.errors <- matrix(NA, k, p, dimnames = list(NULL, paste(1:p)))
+
+for (j in 1:k) {
+  best.fit <- regsubsets(Banks ~ ., data = data_fin1[folds != j, ])
+  for (i in 1:p) {
+    mat <- model.matrix(as.formula(best.fit$call[[2]]), data_fin1[folds == j, ])
+    coefi <- coef(best.fit, id = i)
+    xvars <- names(coefi)
+    pred <- mat[, xvars] %*% coefi
+    cv.errors[j, i] <- mean((data_fin1$Banks[folds == j] - pred)^2)
+  }
+}
+cv.mean <- colMeans(cv.errors)
+cv.mean
+```
+
+```
+##        1        2        3        4        5
+## 1081644.5 722335.0 537183.3 527848.8 520124.6
+```
+
+These are the means of the MSE computed for each model size, from 1 to p
+predictors.
+
+```{r loocv-plot}
+par(mfrow = c(1, 1))
+plot(cv.mean, type = "b", pch = 19,
+     xlab = "Number of predictors", ylab = "CV error")
+abline(v = which.min(cv.mean), col = 2, lty = 2)
+```
+
+As we can see, the best model found by the LOOCV approach is the full model
+including all the variables. Actually, the CV error curve does not reach a
+clear plateau, which may suggest that further variables would need to be
+included to build a more complete model. Nevertheless, the drop from three
+to five variables is quite small, so we can select the full model being
+confident that it is near the plateau.
+
+## 5 - Best overall model: criterion approach
+
+We now perform a criterion-based approach and show the results for each of
+four criteria: BIC, AIC, Adjusted R2, and Mallow's Cp.
+
+```{r criteria, fig.width=12, fig.height=4}
+ols <- regsubsets(Banks ~ ., data = data_fin1)
+summ <- summary(ols)
+par(pty = "s", mfrow = c(1, 4), mar = c(2, 1, 2, 1))
+
+# BIC
+plot(summ$bic, type = "b", pch = 19,
+     xlab = "Number of predictors", ylab = "", main = "Drop in BIC")
+abline(v = which.min(summ$bic), col = 2, lty = 2)
+
+# Mallow's Cp
+plot(summ$cp, type = "b", pch = 19,
+     xlab = "Number of predictors", ylab = "",
+     main = expression(paste("Mallow's ", C[p])))
+abline(v = which.min(summ$cp), col = 2, lty = 2)
+
+# Adjusted R^2
+plot(summ$adjr2, type = "b", pch = 19,
+     xlab = "Number of predictors", ylab = "",
+     main = expression(paste("Adjusted ", R^2)))
+abline(v = which.max(summ$adjr2), col = 2, lty = 2)
+
+# AIC (derived from BIC)
+i <- 1
+p <- 5
+n <- nrow(data_fin1)
+aic <- matrix(NA, p, 1)
+for (i in 1:p) {
+  aic[i] <- summ$bic[i] - (i + 2) * log(n) + 2 * (i + 2)
+}
+plot(aic, type = "b", pch = 19,
+     xlab = "Number of predictors", ylab = "", main = "Drop in AIC")
+abline(v = which.min(aic), col = 2, lty = 2)
+```
+
+The four criteria agree with the leave-one-out cross validation on the best
+model, which is again the full one, and also on the absence of a clearly
+visible plateau.
+
+## 6 - Collinearity issues
+
+Potential collinearity issues between the variables may be identified by
+looking at the correlation matrix.
+
+```{r correlation}
+kable(cor(data_fin1[, c(1, 2, 3, 4, 5, 6)]))
+```
+
+```
+##            Banks        BTP        VIX     Spread        EUR        CDS
+## Banks  1.0000000  0.0965796 -0.5077408 -0.3167821  0.0639996 -0.5467025
+## BTP    0.0965796  1.0000000 -0.1036903 -0.8190350  0.8082657 -0.6186121
+## VIX   -0.5077408 -0.1036903  1.0000000  0.1028636 -0.2291563  0.1745433
+## Spread -0.3167821 -0.8190350  0.1028636  1.0000000 -0.6268413  0.9219983
+## EUR    0.0639996  0.8082657 -0.2291563 -0.6268413  1.0000000 -0.4582159
+## CDS   -0.5467025 -0.6186121  0.1745433  0.9219983 -0.4582159  1.0000000
+```
+
+The correlation matrix highlights only two correlations which might come to
+our attention: BTP and Spread at more than 81%, and BTP and EUR above 80%.
+To investigate further we compute the variance inflation factor for the
+multiple model.
+
+```{r vif}
+# --- partially reconstructed from PDF export, original .Rmd source was not
+#     available; the call itself was not echoed in the report, only its
+#     printed output. `vif()` from the `car` package is the standard tool
+#     for this and matches the narrative and the printed values exactly. ---
+vif(mod1)
+```
+
+```
+##      BTP      VIX   Spread      EUR      CDS
+## 2.4291074 0.3947062 7.1746121 1.0425899 3.9147343
+```
+
+We can now exclude multicollinearity issues among the predictors, since no
+VIF value is above 10.
+
+## 7 - Diagnostics
+
+### Constant variance and linearity assumption for the errors
+
+The residual plot shows evidence of non-linearity and non-constant variance.
+From the residuals-against-covariates plot we can notice that the VIX
+variable seems to have the biggest influence on non-linearity and
+non-constant variance, so an analysis-of-variance test is run to assess
+whether this is the case. The test shows a small p-value, hence there is
+evidence against the null hypothesis that the true ratio of variances is
+equal to 1. If we reject it, we have to assume that the variances for the
+two groups are statistically different, so variance is not constant. The
+tested groups have been graphically identified as being below and above 50.
+
+```{r residual-plot}
+plot(fitted(mod1), residuals(mod1),
+     xlab = "Fitted values", ylab = "Residuals",
+     pch = 1, cex = 0.6, col = "purple")
+abline(h = 0, col = "blue", lwd = 2, lty = 1)
+```
+
+```{r residual-plots-covariates}
+residualPlots(mod1, pch = ".", col = "purple")
+```
+
+```{r var-test}
+var.test(residuals(mod1)[data_fin1$VIX >= 50],
+         residuals(mod1)[data_fin1$VIX <= 50])
+```
+
+```
+#### F test to compare two variances
+#### data:  residuals(mod1)[data_fin1$VIX >= 50] and residuals(mod1)[data_fin1$VIX <= 50]
+## F = 2.7979, num df = 16, denom df = 1001, p-value = 0.000381
+## alternative hypothesis: true ratio of variances is not equal to 1
+## 95 percent confidence interval:
+##  1.540510 6.503614
+## sample estimates:
+## ratio of variances
+##            2.797916
+```
+
+### Normality assumption
+
+```{r normality, fig.width=12, fig.height=4}
+par(mfrow = c(1, 3))
+boxplot(residuals(mod1), col = "blue")
+qqnorm(residuals(mod1), col = "purple")
+qqline(residuals(mod1), col = 1)
+hist(residuals(mod1), col = "purple")
+```
+
+```{r shapiro}
+# --- partially reconstructed from PDF export, original .Rmd source was not
+#     available; only the printed Shapiro-Wilk output was present in the
+#     report, not the call itself. ---
+shapiro.test(residuals(mod1))
+```
+
+```
+#### Shapiro-Wilk normality test
+#### data:  residuals(mod1)
+## W = 0.97044, p-value = 1.518e-13
+```
+
+The p-value clearly confirms evidence against the null hypothesis, which has
+to be rejected: the residuals are not normally distributed. Looking at the
+Q-Q plot, it seems there is skewness in the residual distribution. When the
+errors are not normal, least squares estimates may not be optimal. They will
+still be the best linear unbiased estimates, but other robust estimators may
+be more effective. Also, tests and confidence intervals become unreliable.
+
+### Leverage points and outliers
+
+#### Leverage points
+
+In the half-normal plot we look for points that diverge substantially from
+the rest of the data, and unfortunately there are many points above the
+rule-of-thumb threshold. The 89 points with high leverage associated with the
+model were saved in an object called `HL` (code run only, output not shown).
+
+```{r leverage, fig.width=6, fig.height=6}
+infl <- influence(mod1)
+hat <- infl$hat
+halfnorm(hat, 4, labs = data_fin1$Data, ylab = "Leverages")
+abline(h = 2 * 5 / nrow(data_fin1), col = 2, lty = 2)
+legend("topleft", legend = "Treshold", col = 2, lty = 2)
+```
+
+```{r high-leverage-ids}
+# --- partially reconstructed from PDF export, original .Rmd source was not
+#     available; the report states the result ("89 points") and names the
+#     object (HL) but the extraction only shows the plot, not this code. ---
+HL <- which(hat > 2 * 5 / nrow(data_fin1))
+length(HL)
+```
+
+#### Outliers
+
+```{r outliers-range}
+# --- partially reconstructed from PDF export, original .Rmd source was not
+#     available; "rsta" is referenced by name later in the text (as
+#     standardized/studentized residuals) and the printed output is the
+#     range of that vector. ---
+rsta <- rstudent(mod1)
+range(rsta)
+```
+
+```
+## [1] -2.661586 4.026095
+```
+
+The range exceeds the usual +/-3 constraint, so there are some outliers above
+the +3 threshold.
+
+```{r outliers-plot}
+plot(fitted(mod1), rsta,
+     xlab = "Fitted values", ylab = "standardized Residuals",
+     pch = 1, cex = 0.6, col = "purple", ylim = c(-3, 4.5))
+abline(h = 0, col = 2, lwd = 2)
+abline(h = 3, col = 3, lwd = 2, lty = 2)
+abline(h = -3, col = 3, lwd = 2, lty = 2)
+```
+
+```{r outlier-ids}
+# --- partially reconstructed from PDF export, original .Rmd source was not
+#     available; the report names the object (OL) and states "16 outliers"
+#     found with the rsta vector. ---
+OL <- which(abs(rsta) > 3)
+length(OL)
+```
+
+As for the high leverage points, the 16 outliers found with the `rsta`
+values were saved in an object called `OL` (code run only). They correspond
+to a couple of date ranges, the first one in February 2022 and the other in
+March 2020. This is interesting because both periods are from the two
+biggest crises financial markets have faced in the last decades: the
+SARS-CoV-2 outbreak and the start of the war in Ukraine.
+
+#### Influential points
+
+An influential point may or may not be an outlier or a leverage point, but
+it will tend to have at least one of these two properties. To see the
+influence of points we compute the maximum Cook's distance.
+
+```{r cooks-distance}
+# --- partially reconstructed from PDF export, original .Rmd source was not
+#     available; only the printed result (observation 715, value 0.1572918)
+#     was present in the report. ---
+cd <- cooks.distance(mod1)
+which.max(cd)
+max(cd)
+```
+
+```
+##      715
+## 0.1572918
+```
+
+Since the maximum value for Cook's distance is much less than 1, it can
+easily be concluded that there are no influential points in the model.
+
+## 8 - Model Improvement
+
+From the diagnostics, some issues have been identified. Summary:
+
+1. The VIX variable's residuals have non-constant variance and non-linearity.
+2. The errors' Q-Q plot shows a skewed (log-normal-like) rather than a
+   normal distribution.
+3. The model presents 89 high-leverage points and 16 outliers.
+
+### High leverage points and outliers removal
+
+Since it is a relatively small set of points, we can simply remove the high
+leverage points and outliers from the model, since they are mostly isolated
+individuals (no cluster was identified in the previous analysis). The new
+dataset without these points, `data_fin2`, is used from here on.
+
+```{r remove-points}
+# --- partially reconstructed from PDF export, original .Rmd source was not
+#     available; the narrative states "the new dataset without these points
+#     is already loaded" without showing the construction of data_fin2. ---
+data_fin2 <- data_fin1[-union(HL, OL), ]
+```
+
+### Variable VIX
+
+```{r vix-transform, fig.width=8, fig.height=4}
+par(mfcol = c(1, 2))
+hist(data_fin1$VIX, main = "VIX distribution", col = "blue")
+hist(log(data_fin1$VIX), main = "log(VIX) distribution", col = "blue")
+```
+
+```{r vix-qq, fig.width=8, fig.height=4}
+par(mfcol = c(1, 2))
+qqnorm(data_fin1$VIX, main = "VIX Q-Q plot", pch = 1, col = "purple")
+qqline(data_fin1$VIX)
+qqnorm(log(data_fin1$VIX), main = "log(VIX) Q-Q plot", pch = 1, col = "purple")
+qqline(log(data_fin1$VIX))
+```
+
+A simple log transformation of the variable is enough in this case to
+address the issue. The Q-Q plot has improved, even though it is still not
+perfect, but it is much closer to the theoretical line, so the
+transformation is effective.
+
+### Normality issues
+
+In this case, no transformation of the response variable improved normality
+at all. This issue was not addressed further in the present project. The
+Q-Q plot and histogram of the residuals are shown for completeness.
+
+```{r residuals-normality, fig.width=8, fig.height=4}
+par(mfcol = c(1, 2))
+hist(residuals(mod1), main = "Residuals distribution", col = "blue")
+qqnorm(residuals(mod1), main = "Residuals Q-Q plot", pch = 1, col = "purple")
+qqline(residuals(mod1))
+```
+
+Finally, we fit the new model and show the residual plots (the model
+fitting itself is run but its output is not printed in the original report):
+
+```{r mod2-fit}
+mod2 <- lm(Banks ~ log(VIX) + Spread + CDS + BTP + EUR, data = data_fin2)
+```
+
+We have finally been able to address most of the issues the diagnostics
+revealed. The final model output is even better than the previous one. All
+the variables remain significant, as well as the global F-test. The
+residual standard error has reduced by about 15%, from 717.3 to 606.2, and
+the adjusted R2 has increased by about 8.6%, from 0.66 to 0.72. We only have
+to keep in mind that the interpretation of the VIX variable must now take
+into account the log transformation.
+
+```{r mod2-residuals}
+plot(fitted(mod2), residuals(mod2),
+     xlab = "Fitted values", ylab = "Residuals",
+     pch = 1, cex = 0.6, col = "purple")
+abline(h = 0, col = "blue", lwd = 2, lty = 1)
+```
+
+```{r mod2-residual-plots}
+residualPlots(mod2, pch = ".", col = "purple")
+```
+
+The regression diagnostics allowed us to properly address most of the
+dataset's issues. Despite this, some issues still remain, like the non-
+normal distribution of the errors, which clearly have fat tails. Moreover,
+although this is not properly part of the present analysis, financial data,
+like most time series data, is often characterized by autocorrelation. The
+autocorrelation function shows that the errors have a very strong
+correlation across time.
+
+```{r acf}
+acf(residuals(mod2))
+```
+
+## 9 - Best model interpretation
+
+Summary of the best model found so far:
+
+```{r mod2-summary}
+summary(mod2)
+```
+
+```
+#### Call:
+## lm(formula = Banks ~ log(VIX) + Spread + CDS + BTP + EUR, data = data_fin2)
+#### Residuals:
+##     Min      1Q  Median      3Q     Max
+## -1660.7  -423.2   -62.7   345.2  2331.8
+#### Coefficients:
+##              Estimate Std. Error t value Pr(>|t|)
+## (Intercept) 14378.234    923.294  15.573  < 2e-16 ***
+## log(VIX)    -1676.398     69.648 -24.069  < 2e-16 ***
+## Spread         36.643      2.024  18.101  < 2e-16 ***
+## CDS           -52.378      1.757 -29.818  < 2e-16 ***
+## BTP            43.982      5.498   8.000 3.76e-15 ***
+## EUR         -3682.103    586.908  -6.274 5.43e-10 ***
+## ---
+## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+#### Residual standard error: 606.2 on 915 degrees of freedom
+## Multiple R-squared:  0.7248, Adjusted R-squared:  0.7233
+## F-statistic: 482 on 5 and 915 DF,  p-value: < 2.2e-16
+```
+
+From the output we can see that all variables are significant, as well as
+the global F-test. The adjusted R2 is consistently high, so the model
+explains more than 72% of the variability of the response. Coefficient
+interpretation must take into account the fact that VIX is log-transformed,
+so its magnitude is now higher because of the log scale.
+
+```{r predictor-effects, fig.width=6, fig.height=4}
+plot(predictorEffects(mod2, ~ BTP), main = "", axes = list(x = list(rotate = 80)))
+plot(predictorEffects(mod2, ~ EUR), main = "", axes = list(x = list(rotate = 80)))
+plot(predictorEffects(mod2, ~ Spread), main = "", axes = list(x = list(rotate = 80)))
+plot(predictorEffects(mod2, ~ CDS), main = "", axes = list(x = list(rotate = 80)))
+plot(predictorEffects(mod2, ~ VIX), main = "", axes = list(x = list(rotate = 80)))
+```
+
+## 10 - Test on each beta_j
+
+To test each of the beta_j coefficients against 0, two-sided, we use the
+t-statistics and p-values from the regression output. The t-value represents
+the number of standard deviations the coefficient estimate is from 0, and
+the p-value represents the probability of observing a t-value as extreme or
+more extreme than the one observed, assuming the null hypothesis is true.
+From the regression output we conclude that all variables are significant,
+intercept included.
+
+## 11 - Group of Regressors
+
+An alternative, nested model excludes the Spread variable, which has the
+biggest VIF.
+
+```{r nested-f-test}
+nestedmod <- lm(Banks ~ BTP + EUR + log(VIX) + CDS, data = data_fin2)
+
+# NOTE: the RSS computation below is reproduced exactly as printed in the
+# source report. Mathematically RSS should be sum(residuals^2), not
+# sum(residuals)^2 - this looks like a pre-existing bug/typo in the original
+# project code rather than an OCR artifact, so it is kept as-is for
+# faithfulness, flagged here rather than silently "fixed".
+RSS0 <- sum(nestedmod$residuals) ^ 2
+RSS1 <- sum(mod2$residuals) ^ 2
+p0 <- 4
+p1 <- 5
+n <- nrow(data_fin2)
+F_stat <- ((RSS0 - RSS1) / (p1 - p0)) / (RSS1 / (n - p1 - 1))
+pf(F_stat, (p1 - p0), (n - p1 - 1), lower.tail = FALSE)
+```
+
+```
+## [1] 3.052683e-198
+```
+
+Based on this p-value, which is basically zero, we conclude that the
+additional predictor in the larger model significantly improves the model
+fit compared to the smaller, nested model.
+
+## 12 - Measure of fit goodness
+
+The residual standard error (an estimate of sigma) is given by:
+
+```{r sigma}
+summ <- summary(mod2)
+summ$sigma
+```
+
+```
+## [1] 606.1537
+```
+
+Estimated variances and covariances of the beta_j are found by multiplying
+sigma^2 by the elements of (X'X)^-1:
+
+```{r var-cov}
+kable(summ$sigma ^ 2 * summ$cov.unscaled)
+```
+
+Estimated standard errors are the square roots of the corresponding
+estimated variances:
+
+```{r std-errors}
+summ$sigma * sqrt(diag(summ$cov.unscaled))
+```
+
+```
+## (Intercept)    log(VIX)      Spread         CDS         BTP         EUR
+##  923.293900   69.648460    2.024365    1.756560    5.498060  586.908000
+```
+
+Finally, the coefficient of determination R2 = 1 - RSS/SSy:
+
+```{r r2}
+summ$r.squared
+```
+
+```
+## [1] 0.7248181
+```
+
+Almost 75% of the variation in Banks is explained by the regressors. Since
+R2 can usually be made larger simply by including more predictors, it is
+sometimes suggested that a modified measure be used that adjusts for the
+number of predictors in the model - the adjusted coefficient of multiple
+determination, which adjusts R2 by dividing each sum of squares by its
+associated degrees of freedom:
+
+```{r adj-r2}
+summ$adj.r.squared
+```
+
+```
+## [1] 0.7233144
+```
+
+## 13 - Prediction
+
+We now try to predict a new observation for the response using predictor
+data from 1/11/2011 - the beginning of one of the worst months in recent
+Italian government history, as the country was a step from default. The
+data are:
+
+* VIX = 38
+* Spread = 469
+* CDS = 454
+* BTP = 90.8
+* EUR = 1.38
+
+```{r prediction}
+newdata <- data.frame(VIX = 38, Spread = 469, CDS = 454, BTP = 90.8, EUR = 1.38)
+predict(mod2, newdata = newdata, interval = "prediction", level = .95)
+```
+
+```
+##       fit        lwr      upr
+## 1 598.4516 -730.4515 1927.355
+```
+
+The predicted value is 598.45. This would mean the Italian financial system
+grinding to a halt, with no bank surviving - a doomsday scenario. For
+reference, on 1/11/2011 the FTSE Italia All-Share Banks index actually
+touched one of its lowest points at 9,353 - worse only in 2016 and 2020,
+after the Covid outbreak. This highlights the limits of extrapolating a
+linear model well outside the range of the observed predictor data.
+
+## 14 - Simulation
+
+```{r simulation, fig.width=6, fig.height=6}
+b0 <- coef(mod2)[1]
+b1 <- coef(mod2)[2]
+b2 <- coef(mod2)[3]
+b3 <- coef(mod2)[4]
+b4 <- coef(mod2)[5]
+b5 <- coef(mod2)[6]
+
+BTP_sim <- rnorm(921, mean(data_fin2$BTP), sd(data_fin2$BTP))
+EUR_sim <- rnorm(921, mean(data_fin2$EUR), sd(data_fin2$EUR))
+VIX_sim <- rnorm(921, mean(data_fin2$VIX), sd(data_fin2$VIX))
+CDS_sim <- rnorm(921, mean(data_fin2$CDS), sd(data_fin2$CDS))
+Spread_sim <- rnorm(921, mean(data_fin2$Spread), sd(data_fin2$Spread))
+
+sim_data <- data.frame(BTP = BTP_sim, EUR = EUR_sim, VIX = VIX_sim,
+                        CDS = CDS_sim, Spread = Spread_sim)
+
+fitted_orig <- predict(mod2, newdata = data_fin2)
+fitted_sim <- predict(mod2, newdata = sim_data)
+
+plot(fitted_orig, fitted_sim, col = c("blue", "red"), pch = 16,
+     xlab = "Original data", ylab = "Simulated data")
+legend("topleft", legend = c("Original data", "Simulated data"),
+       col = c("blue", "red"), pch = 16)
+```
